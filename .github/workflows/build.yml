@@ -1,83 +1,81 @@
-name: Build luci-app-wechatpush APK for OpenWrt 25.12 (snapshots)
+steps:
+  - name: Checkout repository
+    uses: actions/checkout@v4
 
-on:
-  workflow_dispatch:  # Manual trigger
-  push:
-    branches: [ master ]
+  - name: Prepare OpenWrt SDK (snapshots - x86/64)
+    run: |
+      cd ${{ github.workspace }}
+      
+      # Current SDK filename (confirmed valid on Dec 24 2025)
+      SDK_FILENAME="openwrt-sdk-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
+      SDK_URL="https://downloads.openwrt.org/snapshots/targets/x86/64/${SDK_FILENAME}"
+      
+      echo "Downloading SDK: ${SDK_URL}"
+      wget -q -O sdk.tar.zst "${SDK_URL}"
+      
+      if [ ! -f "sdk.tar.zst" ]; then
+        echo "::error::SDK download failed!"
+        exit 1
+      fi
+      
+      echo "Extracting SDK (.tar.zst)..."
+      tar --use-compress-program=unzstd -xf sdk.tar.zst
+      
+      mv openwrt-sdk-* sdk || { echo "::error::Failed to rename SDK dir"; exit 1; }
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
+  - name: Setup package and feeds
+    run: |
+      cd sdk
+      
+      echo "Updating and installing feeds..."
+      ./scripts/feeds update -a
+      ./scripts/feeds install -a
+      ./scripts/feeds install -a -p luci  # Ensure LuCI dependencies
+      
+      echo "Copying package source (excluding sdk dir)..."
+      mkdir -p package/luci-app-wechatpush
+      
+      # Use rsync to copy only relevant files, exclude the sdk dir we just created
+      rsync -a --exclude='sdk' --exclude='.git*' --exclude='*.yml' \
+        ${{ github.workspace }}/ package/luci-app-wechatpush/
+      
+      # Verify Makefile exists (safety check)
+      if [ ! -f "package/luci-app-wechatpush/Makefile" ]; then
+        echo "::error::Makefile not found in package dir after copy!"
+        ls -la package/luci-app-wechatpush/
+        exit 1
+      fi
+      
+      echo "Configuring .config..."
+      cat << EOF >> .config
+      CONFIG_PACKAGE_luci-app-wechatpush=m
+      CONFIG_PACKAGE_luci-i18n-wechatpush-zh-cn=m
+      CONFIG_LUCI_LANG_zh_Hans=y
+      EOF
+      
+      make defconfig
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+  - name: Compile the package
+    working-directory: sdk
+    run: |
+      echo "Compiling luci-app-wechatpush..."
+      make package/luci-app-wechatpush/compile V=s -j$(nproc) || {
+        echo "::error::Compilation failed - check logs above"
+        exit 1
+      }
 
-      - name: Prepare OpenWrt SDK (snapshots - x86/64)
-        run: |
-          cd ${{ github.workspace }}
-          
-          # Current SDK filename (confirmed valid on Dec 24 2025)
-          SDK_FILENAME="openwrt-sdk-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
-          SDK_URL="https://downloads.openwrt.org/snapshots/targets/x86/64/${SDK_FILENAME}"
-          
-          echo "Downloading SDK: ${SDK_URL}"
-          wget -q -O sdk.tar.zst "${SDK_URL}"
-          
-          if [ ! -f "sdk.tar.zst" ]; then
-            echo "::error::SDK download failed!"
-            exit 1
-          fi
-          
-          echo "Extracting SDK (.tar.zst)..."
-          tar --use-compress-program=unzstd -xf sdk.tar.zst
-          
-          mv openwrt-sdk-* sdk || { echo "::error::Failed to rename SDK dir"; exit 1; }
+  - name: Check compiled packages
+    working-directory: sdk
+    run: |
+      echo "Listing all generated .apk files:"
+      find bin/packages -name "*.apk" | grep wechatpush || echo "No wechatpush package found!"
+      ls -la bin/packages/*/luci/ || true
 
-      - name: Setup package and feeds
-        run: |
-          cd sdk
-          
-          echo "Updating and installing feeds..."
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
-          ./scripts/feeds install -a -p luci  # Ensure LuCI dependencies
-          
-          echo "Copying package source (excluding sdk dir)..."
-          mkdir -p package/luci-app-wechatpush
-          
-          # Use rsync to copy only relevant files, exclude the sdk dir we just created
-          rsync -a --exclude='sdk' --exclude='.git*' --exclude='*.yml' \
-            ${{ github.workspace }}/ package/luci-app-wechatpush/
-          
-          # Verify Makefile exists (safety check)
-          if [ ! -f "package/luci-app-wechatpush/Makefile" ]; then
-            echo "::error::Makefile not found in package dir after copy!"
-            ls -la package/luci-app-wechatpush/
-            exit 1
-          fi
-          
-          echo "Configuring .config..."
-          cat << EOF >> .config
-          CONFIG_PACKAGE_luci-app-wechatpush=m
-          CONFIG_PACKAGE_luci-i18n-wechatpush-zh-cn=m
-          CONFIG_LUCI_LANG_zh_Hans=y
-          EOF
-          
-          make defconfig
-
-      - name: Compile the package
-        working-directory: sdk
-        run: |
-          echo "Compiling luci-app-wechatpush..."
-          make package/luci-app-wechatpush/compile V=s -j$(nproc) || {
-            echo "::error::Compilation failed - check logs above"
-            exit 1
-          }
-
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: luci-app-wechatpush-apk
-          path: sdk/bin/packages/*/luci/*.apk
-          if-no-files-found: error
+  - name: Upload APK artifact
+    uses: actions/upload-artifact@v4
+    with:
+      name: luci-app-wechatpush-apk
+      path: |
+        sdk/bin/packages/*/luci/luci-app-wechatpush*.apk
+        sdk/bin/packages/*/luci/luci-i18n-wechatpush*.apk
+      if-no-files-found: warn
