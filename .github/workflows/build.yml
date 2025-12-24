@@ -1,11 +1,13 @@
 name: Build luci-app-wechatpush APK for OpenWrt 25.12 (snapshots)
 
 on:
-  workflow_dispatch:  # Manual trigger
+  workflow_dispatch:  # 手动触发
   push:
     branches: [ master ]
+  release:
+    types: [published]
 
-jobs:  # ← This is the missing/required key!
+jobs:
   build:
     runs-on: ubuntu-latest
 
@@ -53,11 +55,47 @@ jobs:  # ← This is the missing/required key!
             exit 1
           fi
           
-          echo "Configuring .config..."
+          echo "Configuring .config (only zh-cn language)..."
           cat << EOF >> .config
           CONFIG_PACKAGE_luci-app-wechatpush=m
           CONFIG_PACKAGE_luci-i18n-wechatpush-zh-cn=m
           CONFIG_LUCI_LANG_zh_Hans=y
+          # Disable other languages to reduce output files
+          CONFIG_LUCI_LANG_ar=n
+          CONFIG_LUCI_LANG_bg=n
+          CONFIG_LUCI_LANG_bn=n
+          CONFIG_LUCI_LANG_ca=n
+          CONFIG_LUCI_LANG_cs=n
+          CONFIG_LUCI_LANG_da=n
+          CONFIG_LUCI_LANG_de=n
+          CONFIG_LUCI_LANG_el=n
+          CONFIG_LUCI_LANG_es=n
+          CONFIG_LUCI_LANG_fa=n
+          CONFIG_LUCI_LANG_fi=n
+          CONFIG_LUCI_LANG_fil=n
+          CONFIG_LUCI_LANG_fr=n
+          CONFIG_LUCI_LANG_ga=n
+          CONFIG_LUCI_LANG_he=n
+          CONFIG_LUCI_LANG_hi=n
+          CONFIG_LUCI_LANG_hu=n
+          CONFIG_LUCI_LANG_it=n
+          CONFIG_LUCI_LANG_ja=n
+          CONFIG_LUCI_LANG_ko=n
+          CONFIG_LUCI_LANG_lt=n
+          CONFIG_LUCI_LANG_mr=n
+          CONFIG_LUCI_LANG_ms=n
+          CONFIG_LUCI_LANG_nl=n
+          CONFIG_LUCI_LANG_no=n
+          CONFIG_LUCI_LANG_pl=n
+          CONFIG_LUCI_LANG_pt=n
+          CONFIG_LUCI_LANG_ro=n
+          CONFIG_LUCI_LANG_ru=n
+          CONFIG_LUCI_LANG_sk=n
+          CONFIG_LUCI_LANG_sv=n
+          CONFIG_LUCI_LANG_ta=n
+          CONFIG_LUCI_LANG_tr=n
+          CONFIG_LUCI_LANG_uk=n
+          CONFIG_LUCI_LANG_vi=n
           EOF
           
           make defconfig
@@ -65,7 +103,7 @@ jobs:  # ← This is the missing/required key!
       - name: Compile the package
         working-directory: sdk
         run: |
-          echo "Compiling..."
+          echo "Compiling luci-app-wechatpush..."
           make package/luci-app-wechatpush/compile V=s -j$(nproc) || {
             echo "::error::Compilation failed"
             exit 1
@@ -77,13 +115,41 @@ jobs:  # ← This is the missing/required key!
           echo "Listing .apk files containing 'wechatpush':"
           find bin/packages -name "*wechatpush*.apk" || echo "→ None found"
           echo ""
-          echo "Full luci directory listing:"
-          ls -la bin/packages/*/luci/ || true
+          echo "Full relevant directory listing:"
+          ls -la bin/packages/*/*/*wechatpush*.apk || true
 
-      - name: Upload found APK files
+      - name: Upload APK artifact (core + zh-cn only)
         uses: actions/upload-artifact@v4
         with:
-          name: wechatpush-apk-files
+          name: wechatpush-apk-essential
           path: |
-            sdk/bin/packages/*/luci/*wechatpush*.apk
-          if-no-files-found: warn
+            sdk/bin/packages/*/*/*wechatpush*.apk
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'release'
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: wechatpush-apk-essential
+          path: release-files
+
+      - name: Create or Update Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name || 'latest-build' }}
+          name: WeChatPush APK Build - ${{ github.ref_name || format('snapshot-{0,date,yyyyMMdd}') }}
+          body: |
+            Auto-generated APK for OpenWrt 25.12 snapshots (main branch)
+            - **luci-app-wechatpush**: latest version (e.g. 3.6.10)
+            - Includes **zh-cn** language pack
+            - Built on: ${{ github.event.head_commit.message || 'Manual trigger' }}
+            - Note: Use --allow-untrusted when installing on router
+          files: release-files/*.apk
+          generate_release_notes: true
+          draft: false
+          prerelease: true
