@@ -1,39 +1,69 @@
-name: Build luci-app-wechatpush APK for OpenWrt 25.12
+name: Build luci-app-wechatpush APK for OpenWrt 25.12 (snapshots)
 
 on:
-  workflow_dispatch:  # 手动触发
+  workflow_dispatch:  # 手动触发（推荐）
   push:
     branches: [ master ]
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Prepare OpenWrt SDK for 25.12
+      - name: Prepare OpenWrt SDK (snapshots - x86/64)
         run: |
-          # 用 main 分支的最新 SDK（25.12 branch 基于 main）
-          SDK_URL="https://downloads.openwrt.org/snapshots/targets/x86/64/openwrt-sdk-*.Linux-x86_64.tar.xz"  # 先用 x86_64 测试，后面改其他架构
-          wget -O sdk.tar.xz $(curl -s https://downloads.openwrt.org/snapshots/targets/x86/64/ | grep -oP 'href="\Kopenwrt-sdk-.*\.tar\.xz(?=")' | head -1 | sed 's|^|https://downloads.openwrt.org/snapshots/targets/x86/64/|')
-          tar -xf sdk.tar.xz
-          mv openwrt-sdk-* sdk
+          cd ${{ github.workspace }}
+          
+          # 当前 snapshots 的 SDK 文件名（gcc-14.3.0，musl，2025-12-24 确认）
+          SDK_FILENAME="openwrt-sdk-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
+          SDK_URL="https://downloads.openwrt.org/snapshots/targets/x86/64/${SDK_FILENAME}"
+          
+          echo "Downloading SDK from: ${SDK_URL}"
+          wget -q -O sdk.tar.zst "${SDK_URL}"
+          
+          if [ ! -f "sdk.tar.zst" ]; then
+            echo "::error::Failed to download SDK! Check filename or network."
+            exit 1
+          fi
+          
+          echo "Extracting SDK (.tar.zst format)..."
+          tar --use-compress-program=unzstd -xf sdk.tar.zst
+          
+          mv openwrt-sdk-* sdk || { echo "::error::Failed to move SDK directory"; exit 1; }
 
-      - name: Setup package
+      - name: Setup package and feeds
         run: |
           cd sdk
+          
+          echo "Updating and installing feeds..."
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+          ./scripts/feeds install -a -p luci   # 确保 LuCI 相关依赖
+          
+          echo "Copying luci-app-wechatpush source..."
           mkdir -p package/luci-app-wechatpush
           cp -r ${{ github.workspace }}/* package/luci-app-wechatpush/
-          echo "CONFIG_PACKAGE_luci-app-wechatpush=m" >> .config
+          
+          echo "Configuring .config..."
+          cat << EOF >> .config
+          CONFIG_PACKAGE_luci-app-wechatpush=m
+          CONFIG_PACKAGE_luci-i18n-wechatpush-zh-cn=m
+          CONFIG_LUCI_LANG_zh_Hans=y
+          EOF
+          
           make defconfig
 
-      - name: Compile
+      - name: Compile the package
         working-directory: sdk
         run: |
-          make package/luci-app-wechatpush/compile V=s -j$(nproc)
+          echo "Starting compilation..."
+          make package/luci-app-wechatpush/compile V=s -j$(nproc) || {
+            echo "::error::Compilation failed!"
+            exit 1
+          }
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
