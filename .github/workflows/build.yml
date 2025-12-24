@@ -130,7 +130,7 @@ jobs:
     name: Create GitHub Release
     runs-on: ubuntu-latest
     needs: build
-    if: always()   # 总是创建 Release，即使手动触发
+    if: always()
     steps:
       - name: Download artifact
         uses: actions/download-artifact@v4
@@ -138,18 +138,30 @@ jobs:
           name: wechatpush-apk-essential
           path: release-files
 
-      - name: Create or Update Release
+      - name: Debug - Show downloaded files structure
+        run: |
+          echo "Current dir: $(pwd)"
+          ls -laR release-files/ || true
+          find release-files -type f -name "*.apk" || echo "No .apk found in release-files"
+
+      - name: Flatten files (move all .apk to current dir)
+        run: |
+          mkdir -p flat-files
+          find release-files -type f -name "*.apk" -exec cp {} flat-files/ \;
+          ls -la flat-files/
+
+      - name: Create/Update Release & Upload
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name || 'latest-build' }}
-          name: WeChatPush APK - ${{ github.ref_name || format('build-{0,date,yyyyMMdd-HHmm}') }}
+          name: WeChatPush APK - Build \( {{ github.run_number }} ( \){{ format('yyyyMMdd-HHmm') }})
           body: |
-            自动生成的 OpenWrt 25.12 snapshots 版本
-            - 包含 luci-app-wechatpush + zh-cn 语言包
-            - 构建触发: ${{ github.event_name }}
-            - Commit: ${{ github.sha }}
-            - 安装提示: apk add --allow-untrusted *.apk
-          files: release-files/*.apk
+            自动构建 OpenWrt 25.12 snapshots 版
+            - luci-app-wechatpush + zh-cn 语言包
+            - 构建方式: ${{ github.event_name }}
+            - 安装: apk add --allow-untrusted *.apk
+          files: flat-files/*.apk
+          fail_on_unmatched_files: true   # 如果没文件，job 失败，便于发现
           generate_release_notes: true
           draft: false
-          prerelease: true   # 标记为预发布，可手动转为正式
+          prerelease: true
