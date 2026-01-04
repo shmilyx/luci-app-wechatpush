@@ -18,49 +18,42 @@ jobs:
       - name: Prepare OpenWrt SDK (snapshots - x86/64)
         run: |
           cd ${{ github.workspace }}
-          
           SDK_FILENAME="openwrt-sdk-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
           SDK_URL="https://downloads.openwrt.org/snapshots/targets/x86/64/${SDK_FILENAME}"
-          
           echo "Downloading SDK: ${SDK_URL}"
           wget -q -O sdk.tar.zst "${SDK_URL}"
-          
           if [ ! -f "sdk.tar.zst" ]; then
             echo "::error::SDK download failed!"
             exit 1
           fi
-          
-          echo "Extracting SDK (.tar.zst)..."
+          echo "Extracting SDK..."
           tar --use-compress-program=unzstd -xf sdk.tar.zst
-          
           mv openwrt-sdk-* sdk || { echo "::error::Failed to rename SDK dir"; exit 1; }
 
       - name: Setup package and feeds
         run: |
           cd sdk
-          
           echo "Updating and installing feeds..."
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           ./scripts/feeds install -a -p luci
-          
+
           echo "Copying package source..."
           mkdir -p package/luci-app-wechatpush
-          
           rsync -a --exclude='sdk' --exclude='.git*' --exclude='*.yml' \
             ${{ github.workspace }}/ package/luci-app-wechatpush/
-          
+
           if [ ! -f "package/luci-app-wechatpush/Makefile" ]; then
             echo "::error::Makefile not found!"
             exit 1
           fi
-          
+
           echo "Configuring .config (only zh-cn language)..."
           cat << EOF >> .config
           CONFIG_PACKAGE_luci-app-wechatpush=m
           CONFIG_PACKAGE_luci-i18n-wechatpush-zh-cn=m
           CONFIG_LUCI_LANG_zh_Hans=y
-          # Disable other languages to reduce output files
+          # Disable other languages
           CONFIG_LUCI_LANG_ar=n
           CONFIG_LUCI_LANG_bg=n
           CONFIG_LUCI_LANG_bn=n
@@ -97,7 +90,6 @@ jobs:
           CONFIG_LUCI_LANG_uk=n
           CONFIG_LUCI_LANG_vi=n
           EOF
-          
           make defconfig
 
       - name: Compile the package
@@ -112,13 +104,11 @@ jobs:
       - name: Check what was actually built
         working-directory: sdk
         run: |
-          echo "Listing .apk files containing 'wechatpush':"
+          echo "Listing built .apk files:"
           find bin/packages -name "*wechatpush*.apk" || echo "→ None found"
-          echo ""
-          echo "Full relevant directory listing:"
           ls -la bin/packages/*/*/*wechatpush*.apk || true
 
-      - name: Upload APK artifact (core + zh-cn only)
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: wechatpush-apk-essential
@@ -127,10 +117,12 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Create GitHub Release
+    name: Create GitHub Release (by version)
     runs-on: ubuntu-latest
     needs: build
-    if: always()
+    # 只在 build 成功或部分成功时运行（避免构建失败还发 release）
+    if: success() || failure()
+
     steps:
       - name: Download artifact
         uses: actions/download-artifact@v4
@@ -138,30 +130,68 @@ jobs:
           name: wechatpush-apk-essential
           path: release-files
 
-      - name: Debug - Show downloaded files structure
-        run: |
-          echo "Current dir: $(pwd)"
-          ls -laR release-files/ || true
-          find release-files -type f -name "*.apk" || echo "No .apk found in release-files"
-
-      - name: Flatten files (move all .apk to current dir)
+      - name: Flatten APK files
         run: |
           mkdir -p flat-files
           find release-files -type f -name "*.apk" -exec cp {} flat-files/ \;
+          echo "APK files ready for release:"
           ls -la flat-files/
 
-      - name: Create/Update Release & Upload
+      - name: Extract version from Makefile
+        id: version
+        run: |
+          # 从仓库根目录的 Makefile 提取版本（因为 checkout 的是主仓库）
+          VERSION=$(grep '^PKG_VERSION:=' ${{ github.workspace }}/Makefile | head -1 | cut -d '=' -f2 | tr -d " '\"" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          if [ -z "$VERSION" ]; then
+            echo "::error::Cannot extract PKG_VERSION from Makefile"
+            exit 1
+          fi
+          echo "Extracted version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Check if tag already exists
+        id: check_tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if git ls-remote --tags origin | grep -q "refs/tags/v${{ steps.version.outputs.version }}$"; then
+            echo "Tag v${{ steps.version.outputs.version }} already exists → Skip creating release"
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "New version → Will create release with tag v${{ steps.version.outputs.version }}"
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release (only for new versions)
+        if: steps.check_tag.outputs.skip == 'false'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name || 'latest-build' }}
-          name: WeChatPush APK - Build \( {{ github.run_number }} ( \){{ format('yyyyMMdd-HHmm') }})
+          tag_name: v${{ steps.version.outputs.version }}
+          name: WeChatPush v${{ steps.version.outputs.version }} - Build ${{ github.run_number }}
           body: |
             自动构建 OpenWrt 25.12 snapshots 版
-            - luci-app-wechatpush + zh-cn 语言包
-            - 构建方式: ${{ github.event_name }}
-            - 安装: apk add --allow-untrusted *.apk
+
+            **版本**: v${{ steps.version.outputs.version }}
+            **包含**:
+            - luci-app-wechatpush
+            - luci-i18n-wechatpush-zh-cn（中文语言包）
+
+            **构建触发**: ${{ github.event_name }}
+            **Commit**: ${{ github.sha }}
+            **构建编号**: #${{ github.run_number }}
+
+            **安装命令**:
+            ```
+            apk add --allow-untrusted *.apk
+            ```
           files: flat-files/*.apk
-          fail_on_unmatched_files: true   # 如果没文件，job 失败，便于发现
-          generate_release_notes: true
+          fail_on_unmatched_files: true
+          generate_release_notes: false   # 你已有自定义 body，可关闭
           draft: false
-          prerelease: true
+          prerelease: true   # snapshot 构建建议标记为 Pre-release
+
+      - name: Notice - Version already released
+        if: steps.check_tag.outputs.skip == 'true'
+        run: |
+          echo "✅ v${{ steps.version.outputs.version }} 已发布过，本次构建不创建新 Release。"
