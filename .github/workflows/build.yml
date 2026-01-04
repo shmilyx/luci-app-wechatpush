@@ -124,6 +124,8 @@ jobs:
     if: success() || failure()
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
@@ -131,7 +133,7 @@ jobs:
           path: release-files
 
       - name: Flatten APK files
-        run: |
+        run: |      
           mkdir -p flat-files
           find release-files -type f -name "*.apk" -exec cp {} flat-files/ \;
           echo "APK files ready for release:"
